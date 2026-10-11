@@ -1,0 +1,95 @@
+currency-symbol: "$"
+
+# Dinero que dan las minas al romper cada bloque.
+# Puedes poner un número ("50") o un rango ("40-60").
+mining:
+  enabled: true
+  cancel-drops: true      # true = el bloque ya no suelta el ítem físico
+  show-actionbar: true
+  rewards:
+    COAL_ORE: "5"
+    DEEPSLATE_COAL_ORE: "5"
+    IRON_ORE: "15"
+    DEEPSLATE_IRON_ORE: "15"
+    COPPER_ORE: "10"
+    GOLD_ORE: "30-40"
+    DEEPSLATE_GOLD_ORE: "30-40"
+    REDSTONE_ORE: "12"
+    LAPIS_ORE: "20"
+    DIAMOND_ORE: "75"
+    DEEPSLATE_DIAMOND_ORE: "75"
+    EMERALD_ORE: "100"
+    DEEPSLATE_EMERALD_ORE: "100"
+    ANCIENT_DEBRIS: "500"
+
+# Tiendas. Cada clave de "items" es el número de casilla (0 = arriba a la izquierda).
+shops:
+  comida:
+    title: "&6&lTienda de Comida"
+    npc-name: "&6&lCocinero"
+    rows: 3
+    filler: GRAY_STAINED_GLASS_PANE
+    items:
+      "11":
+        material: GOLDEN_APPLE
+        amount: 4
+        name: "&6Manzanas doradas"
+        lore:
+          - "&7Pack de 4 manzanas"
+        price: 5000
+      "13":
+        material: COOKED_BEEF
+        amount: 32
+        name: "&eFilete cocinado"
+        price: 1500
+      "15":
+        material: ENCHANTED_GOLDEN_APPLE
+        amount: 1
+        name: "&d&lNotch Apple"
+        price: 25000
+  armas:
+    title: "&c&lTienda de Armas"
+    npc-name: "&c&lArmero"
+    rows: 3
+    filler: GRAY_STAINED_GLASS_PANE
+    items:
+      "11":
+        material: DIAMOND_SWORD
+        name: "&bEspada de diamante"
+        enchants: ["sharpness:3", "unbreaking:2"]
+        price: 20000
+      "13":
+        material: DIAMOND_CHESTPLATE
+        name: "&bPechera de diamante"
+        enchants: ["protection:3", "unbreaking:2"]
+        price: 30000
+      "15":
+        material: BOW
+        name: "&eArco"
+        enchants: ["power:3", "infinity:1"]
+        price: 15000
+        # commands: ["give {player} arrow 16"]   # comandos extra al comprar
+        # give-item: false                        # true por defecto
+
+messages:
+  prefix: "&8[&bShop&8] &r"
+  lore-price: "&7Precio: &a{price}"
+  lore-click: "&eClic para comprar"
+  mined: "&a+{amount}"
+  bought: "&aHas comprado &f{item} &apor &e{price}&a."
+  not-enough: "&cNo tienes suficiente dinero. Cuesta &e{price} &cy tienes &e{balance}&c."
+  inventory-full: "&cNo tienes espacio en el inventario."
+  no-economy: "&cNo hay un plugin de economía activo."
+  no-permission: "&cNo tienes permiso."
+  usage: "&cUso: &e/neyshop <npc|link|remove|open|list|reload>"
+  reloaded: "&aConfiguración recargada."
+  player-only: "&cSolo jugadores."
+  shop-not-found: "&cEsa tienda no existe. Tiendas: &e{shops}"
+  player-not-found: "&cJugador no encontrado."
+  npc-created: "&aAldeano creado para la tienda &e{shop}&a."
+  npc-click-link: "&eHaz clic derecho en el mob que quieres convertir en la tienda &6{shop}&e."
+  npc-click-remove: "&eHaz clic derecho en el aldeano de tienda que quieres borrar."
+  npc-linked: "&aMob vinculado a la tienda &e{shop}&a."
+  npc-removed: "&aAldeano de tienda eliminado."
+  npc-not-shop: "&cEse mob no es una tienda."
+  list: "&eTiendas: &f{shops}"
