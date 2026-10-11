@@ -1,15 +1,19 @@
-name: NeyShop
+<escape>name: NeyShop
 version: 1.0.0
 main: com.neyshop.NeyShop
 api-version: '1.20'
 depend: [Vault]
-softdepend: [Essentials, CMI, CataMines]
+
 commands:
-  neyshop:
-    description: Administración de NeyShop
-    usage: /neyshop <npc|link|remove|open|list|reload>
-    aliases: [nshop]
+neyshop:
+description: Comandos del sistema NeyShop
+usage: /neyshop help
+aliases: [ns]
+
 permissions:
-  neyshop.admin:
-    description: Administrar NeyShop
-    default: op
+neyshop.admin:
+description: Permite administrar las tiendas
+default: op
+neyshop.sell:
+description: Permite vender objetos al servidor
+default: true</escape>
