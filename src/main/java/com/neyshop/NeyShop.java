@@ -1,12 +1,8 @@
 package com.neyshop;
 
-import net.md_5.bungee.api.ChatMessageType;
-import net.md_5.bungee.api.chat.TextComponent;
 import net.milkbowl.vault.economy.Economy;
-import net.milkbowl.vault.economy.EconomyResponse;
 import org.bukkit.Bukkit;
 import org.bukkit.ChatColor;
-import org.bukkit.GameMode;
 import org.bukkit.Material;
 import org.bukkit.NamespacedKey;
 import org.bukkit.Sound;
@@ -15,490 +11,361 @@ import org.bukkit.command.CommandExecutor;
 import org.bukkit.command.CommandSender;
 import org.bukkit.command.TabCompleter;
 import org.bukkit.configuration.ConfigurationSection;
-import org.bukkit.enchantments.Enchantment;
-import org.bukkit.entity.Entity;
-import org.bukkit.entity.LivingEntity;
+import org.bukkit.configuration.file.YamlConfiguration;
 import org.bukkit.entity.Player;
-import org.bukkit.entity.Villager;
 import org.bukkit.event.EventHandler;
-import org.bukkit.event.EventPriority;
 import org.bukkit.event.Listener;
-import org.bukkit.event.block.BlockBreakEvent;
-import org.bukkit.event.entity.EntityDamageEvent;
 import org.bukkit.event.inventory.InventoryClickEvent;
 import org.bukkit.event.inventory.InventoryDragEvent;
-import org.bukkit.event.player.PlayerInteractEntityEvent;
-import org.bukkit.inventory.EquipmentSlot;
 import org.bukkit.inventory.Inventory;
-import org.bukkit.inventory.InventoryHolder;
 import org.bukkit.inventory.ItemStack;
-import org.bukkit.inventory.PlayerInventory;
 import org.bukkit.inventory.meta.ItemMeta;
 import org.bukkit.persistence.PersistentDataType;
 import org.bukkit.plugin.RegisteredServiceProvider;
 import org.bukkit.plugin.java.JavaPlugin;
 
-import java.text.DecimalFormat;
-import java.text.DecimalFormatSymbols;
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.Collections;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Locale;
-import java.util.Map;
-import java.util.Set;
-import java.util.UUID;
+import java.io.File;
+import java.io.IOException;
+import java.util.*;
+import java.util.stream.Collectors;
 
-public class NeyShop extends JavaPlugin implements Listener, CommandExecutor, TabCompleter {
-
-    /** Identifica los inventarios de tienda. */
-    public static class ShopHolder implements InventoryHolder {
-        final String id;
-        Inventory inv;
-
-        ShopHolder(String id) {
-            this.id = id;
-        }
-
-        @Override
-        public Inventory getInventory() {
-            return inv;
-        }
-    }
-
-    private static final List<String> SUBS = Arrays.asList(
-            "create", "npc", "link", "remove", "additem", "removeitem",
-            "delete", "settitle", "setrows", "open", "list", "reload");
-    private static final List<String> SHOP_ARG = Arrays.asList(
-            "npc", "link", "additem", "removeitem", "delete", "settitle", "setrows", "open");
-
+public final class NeyShop extends JavaPlugin implements Listener, CommandExecutor, TabCompleter {
     private Economy economy;
-    private NamespacedKey shopKey;
-    private final Map<UUID, String> pending = new HashMap<>();
+    private File shopsFile;
+    private YamlConfiguration shops;
+    private NamespacedKey guiKey;
+    private final Map<UUID, PendingPurchase> pending = new HashMap<>();
+    private final Map<UUID, String> openedShop = new HashMap<>();
+    private final Map<UUID, String> editorShop = new HashMap<>();
+
+    private static final String PREFIX = "§6§lNEYSHOP §8» §r";
+    private static final String SHOP_TITLE_PREFIX = "§8NeyShop: ";
+    private static final String CONFIRM_TITLE = "§8Confirmar compra";
+    private static final String EDITOR_TITLE = "§8Editor: ";
 
     @Override
     public void onEnable() {
         saveDefaultConfig();
-        shopKey = new NamespacedKey(this, "shop");
+        guiKey = new NamespacedKey(this, "neyshop_action");
+        shopsFile = new File(getDataFolder(), "shops.yml");
+        if (!shopsFile.exists()) {
+            getDataFolder().mkdirs();
+            try { shopsFile.createNewFile(); } catch (IOException e) { getLogger().severe("No se pudo crear shops.yml: " + e.getMessage()); }
+        }
+        shops = YamlConfiguration.loadConfiguration(shopsFile);
+
+        RegisteredServiceProvider<Economy> provider = getServer().getServicesManager().getRegistration(Economy.class);
+        if (provider != null) economy = provider.getProvider();
+
+        Objects.requireNonNull(getCommand("neyshop")).setExecutor(this);
+        Objects.requireNonNull(getCommand("neyshop")).setTabCompleter(this);
         getServer().getPluginManager().registerEvents(this, this);
-        if (getCommand("neyshop") != null) {
-            getCommand("neyshop").setExecutor(this);
-            getCommand("neyshop").setTabCompleter(this);
-        }
-        getLogger().info("NeyShop activado.");
+
+        if (economy == null) getLogger().warning("Vault/economy no detectada. Las tiendas cargan, pero las compras y ventas necesitan una economía compatible.");
+        getLogger().info("NeyShop habilitado. Tiendas: " + getShopNames().size());
     }
 
-    // ---------- Utilidades ----------
-    private Economy eco() {
-        if (economy == null) {
-            RegisteredServiceProvider<Economy> rsp = getServer().getServicesManager().getRegistration(Economy.class);
-            if (rsp != null) economy = rsp.getProvider();
-        }
-        return economy;
+    @Override
+    public void onDisable() {
+        saveShops();
     }
 
-    private String color(String s) {
-        return ChatColor.translateAlternateColorCodes('&', s == null ? "" : s);
+    private String color(String text) {
+        return ChatColor.translateAlternateColorCodes('&', text == null ? "" : text);
     }
 
-    private String msg(String key, String... kv) {
-        String s = getConfig().getString("messages." + key, key);
-        for (int i = 0; i + 1 < kv.length; i += 2) s = s.replace("{" + kv[i] + "}", kv[i + 1]);
-        return color(getConfig().getString("messages.prefix", "") + s);
+    private void msg(CommandSender sender, String text) {
+        sender.sendMessage(PREFIX + color(text));
     }
 
-    private void send(Player p, String key, String... kv) {
-        p.sendMessage(msg(key, kv));
+    private boolean isAdmin(CommandSender sender) {
+        return sender.hasPermission("neyshop.admin");
     }
 
-    private String fmt(double v) {
-        DecimalFormat df = new DecimalFormat("#,##0.##", DecimalFormatSymbols.getInstance(Locale.US));
-        return getConfig().getString("currency-symbol", "$") + df.format(v);
-    }
-
-    private Set<String> shopIds() {
-        ConfigurationSection sec = getConfig().getConfigurationSection("shops");
-        if (sec == null) return Collections.emptySet();
-        return sec.getKeys(false);
-    }
-
-    private boolean shopExists(String id) {
-        return getConfig().getConfigurationSection("shops." + id) != null;
-    }
-
-    private boolean validId(String id) {
-        return id.matches("[a-z0-9_-]{1,32}");
-    }
-
-    private int rowsOf(String id) {
-        return Math.max(1, Math.min(6, getConfig().getInt("shops." + id + ".rows", 3)));
-    }
-
-    private void createShop(String id) {
-        String base = "shops." + id;
-        getConfig().set(base + ".title", "&6&l" + id);
-        getConfig().set(base + ".npc-name", "&6&l" + id);
-        getConfig().set(base + ".rows", 3);
-        getConfig().set(base + ".filler", "GRAY_STAINED_GLASS_PANE");
-        saveConfig();
-    }
-
-    private int freeSlot(String id) {
-        int rows = rowsOf(id);
-        for (int i = 0; i < rows * 9; i++) {
-            if (!getConfig().contains("shops." + id + ".items." + i)) return i;
-        }
-        return -1;
-    }
-
-    private double parseAmount(String raw) {
-        try {
-            if (raw.contains("-")) {
-                String[] p = raw.split("-");
-                double min = Double.parseDouble(p[0].trim());
-                double max = Double.parseDouble(p[1].trim());
-                if (max < min) {
-                    double t = min;
-                    min = max;
-                    max = t;
-                }
-                return Math.floor(min + Math.random() * (max - min + 1));
-            }
-            return Double.parseDouble(raw.trim());
-        } catch (Exception ex) {
-            return 0;
-        }
-    }
-
-    // ---------- Minas: dinero digital ----------
-    @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
-    public void onBreak(BlockBreakEvent e) {
-        if (!getConfig().getBoolean("mining.enabled", true)) return;
-        Player p = e.getPlayer();
-        if (p.getGameMode() == GameMode.CREATIVE) return;
-        String raw = getConfig().getString("mining.rewards." + e.getBlock().getType().name());
-        if (raw == null) return;
-        double amount = parseAmount(raw);
-        if (amount <= 0) return;
-        Economy bank = eco();
-        if (bank == null) return;
-
-        bank.depositPlayer(p, amount);
-        if (getConfig().getBoolean("mining.cancel-drops", true)) e.setDropItems(false);
-        if (getConfig().getBoolean("mining.show-actionbar", true)) {
-            String text = color(getConfig().getString("messages.mined", "&a+{amount}").replace("{amount}", fmt(amount)));
-            p.spigot().sendMessage(ChatMessageType.ACTION_BAR, new TextComponent(text));
-        }
-    }
-
-    // ---------- Menú de tienda ----------
-    private void addPriceLore(ItemStack it, double price) {
-        ItemMeta meta = it.getItemMeta();
-        if (meta == null) return;
-        List<String> lore = meta.hasLore() && meta.getLore() != null ? new ArrayList<>(meta.getLore()) : new ArrayList<>();
-        lore.add("");
-        lore.add(color(getConfig().getString("messages.lore-price", "&7Precio: &a{price}")
-                .replace("{price}", fmt(price))));
-        lore.add(color(getConfig().getString("messages.lore-click", "&eClic para comprar")));
-        meta.setLore(lore);
-        it.setItemMeta(meta);
-    }
-
-    private ItemStack buildItem(ConfigurationSection s, boolean forDisplay) {
-        if (s == null) return null;
-
-        // Ítem guardado desde el juego con /neyshop additem
-        if (s.isItemStack("item")) {
-            ItemStack saved = s.getItemStack("item");
-            if (saved == null || saved.getType().isAir()) return null;
-            ItemStack it = saved.clone();
-            if (forDisplay && s.contains("price")) addPriceLore(it, s.getDouble("price"));
-            return it;
-        }
-
-        // Ítem definido a mano en el config
-        Material m = Material.matchMaterial(s.getString("material", "STONE"));
-        if (m == null || m.isAir()) return null;
-        int amount = Math.max(1, Math.min(64, s.getInt("amount", 1)));
-        ItemStack it = new ItemStack(m, amount);
-        ItemMeta meta = it.getItemMeta();
-        if (meta == null) return it;
-
-        if (s.contains("name")) meta.setDisplayName(color(s.getString("name")));
-        List<String> lore = new ArrayList<>();
-        for (String l : s.getStringList("lore")) lore.add(color(l));
-        if (!lore.isEmpty()) meta.setLore(lore);
-
-        for (String en : s.getStringList("enchants")) {
-            String[] parts = en.split(":");
-            Enchantment ench = Enchantment.getByKey(NamespacedKey.minecraft(parts[0].trim().toLowerCase(Locale.ROOT)));
-            if (ench == null) continue;
-            int lvl = 1;
-            if (parts.length > 1) {
-                try {
-                    lvl = Integer.parseInt(parts[1].trim());
-                } catch (NumberFormatException ignored) {
-                }
-            }
-            meta.addEnchant(ench, lvl, true);
-        }
-        it.setItemMeta(meta);
-        if (forDisplay && s.contains("price")) addPriceLore(it, s.getDouble("price"));
-        return it;
-    }
-
-    private void openShop(Player p, String id) {
-        ConfigurationSection sec = getConfig().getConfigurationSection("shops." + id);
-        if (sec == null) {
-            send(p, "shop-not-found", "shops", String.join(", ", shopIds()));
-            return;
-        }
-        int rows = rowsOf(id);
-        ShopHolder holder = new ShopHolder(id);
-        Inventory inv = Bukkit.createInventory(holder, rows * 9, color(sec.getString("title", "Tienda")));
-        holder.inv = inv;
-
-        ConfigurationSection items = sec.getConfigurationSection("items");
-        if (items != null) {
-            for (String slotKey : items.getKeys(false)) {
-                int slot;
-                try {
-                    slot = Integer.parseInt(slotKey);
-                } catch (NumberFormatException ex) {
-                    continue;
-                }
-                if (slot < 0 || slot >= rows * 9) continue;
-                ItemStack display = buildItem(items.getConfigurationSection(slotKey), true);
-                if (display != null) inv.setItem(slot, display);
-            }
-        }
-
-        String filler = sec.getString("filler");
-        if (filler != null) {
-            Material fm = Material.matchMaterial(filler);
-            if (fm != null && !fm.isAir()) {
-                ItemStack f = new ItemStack(fm);
-                ItemMeta meta = f.getItemMeta();
-                if (meta != null) {
-                    meta.setDisplayName(" ");
-                    f.setItemMeta(meta);
-                }
-                for (int i = 0; i < inv.getSize(); i++) {
-                    if (inv.getItem(i) == null) inv.setItem(i, f);
-                }
-            }
-        }
-        p.openInventory(inv);
-    }
-
-    private boolean canFit(PlayerInventory inv, ItemStack item) {
-        int space = 0;
-        for (ItemStack st : inv.getStorageContents()) {
-            if (st == null || st.getType().isAir()) space += item.getMaxStackSize();
-            else if (st.isSimilar(item)) space += Math.max(0, st.getMaxStackSize() - st.getAmount());
-            if (space >= item.getAmount()) return true;
-        }
+    private boolean requireAdmin(CommandSender sender) {
+        if (isAdmin(sender)) return true;
+        msg(sender, "&cNo tienes permiso. Necesitas neyshop.admin.");
         return false;
     }
 
-    private void buy(Player p, ConfigurationSection s) {
-        Economy bank = eco();
-        if (bank == null) {
-            send(p, "no-economy");
-            return;
-        }
-        double price = s.getDouble("price", 0);
-        if (price < 0) return;
-        ItemStack item = s.getBoolean("give-item", true) ? buildItem(s, false) : null;
-
-        if (!bank.has(p, price)) {
-            send(p, "not-enough", "price", fmt(price), "balance", fmt(bank.getBalance(p)));
-            return;
-        }
-        if (item != null && !canFit(p.getInventory(), item)) {
-            send(p, "inventory-full");
-            return;
-        }
-        EconomyResponse r = bank.withdrawPlayer(p, price);
-        if (!r.transactionSuccess()) {
-            send(p, "not-enough", "price", fmt(price), "balance", fmt(bank.getBalance(p)));
-            return;
-        }
-        if (item != null) p.getInventory().addItem(item);
-        for (String cmd : s.getStringList("commands")) {
-            Bukkit.dispatchCommand(Bukkit.getConsoleSender(), cmd.replace("{player}", p.getName()));
-        }
-
-        String name;
-        if (item != null) {
-            ItemMeta im = item.getItemMeta();
-            String base = (im != null && im.hasDisplayName())
-                    ? im.getDisplayName()
-                    : item.getType().name().toLowerCase(Locale.ROOT).replace('_', ' ');
-            name = item.getAmount() + "x " + base;
-        } else {
-            name = color(s.getString("name", "ítem"));
-        }
-        send(p, "bought", "item", name, "price", fmt(price));
-        p.playSound(p.getLocation(), Sound.ENTITY_EXPERIENCE_ORB_PICKUP, 1f, 1f);
+    private Set<String> getShopNames() {
+        ConfigurationSection section = shops.getConfigurationSection("shops");
+        if (section == null) return new TreeSet<>(String.CASE_INSENSITIVE_ORDER);
+        return section.getKeys(false).stream().collect(Collectors.toCollection(() -> new TreeSet<>(String.CASE_INSENSITIVE_ORDER)));
     }
 
-    @EventHandler
-    public void onClick(InventoryClickEvent e) {
-        Inventory top = e.getView().getTopInventory();
-        if (!(top.getHolder() instanceof ShopHolder)) return;
-        e.setCancelled(true);
-        if (!(e.getWhoClicked() instanceof Player)) return;
-        if (e.getClickedInventory() == null || e.getClickedInventory() != top) return;
-        ShopHolder h = (ShopHolder) top.getHolder();
-        ConfigurationSection sec = getConfig().getConfigurationSection("shops." + h.id + ".items." + e.getSlot());
-        if (sec == null || !sec.contains("price")) return;
-        buy((Player) e.getWhoClicked(), sec);
+    private String path(String shop) {
+        return "shops." + shop.toLowerCase(Locale.ROOT);
     }
 
-    @EventHandler
-    public void onDrag(InventoryDragEvent e) {
-        if (e.getView().getTopInventory().getHolder() instanceof ShopHolder) e.setCancelled(true);
+    private boolean shopExists(String shop) {
+        return shops.isConfigurationSection(path(shop));
     }
 
-    // ---------- Aldeanos ----------
-    private void setupNpc(LivingEntity ent, String id) {
-        ent.getPersistentDataContainer().set(shopKey, PersistentDataType.STRING, id);
-        ent.setAI(false);
-        ent.setInvulnerable(true);
-        ent.setSilent(true);
-        ent.setCollidable(false);
-        ent.setRemoveWhenFarAway(false);
-        String name = getConfig().getString("shops." + id + ".npc-name");
-        if (name != null) {
-            ent.setCustomName(color(name));
-            ent.setCustomNameVisible(true);
-        }
+    private void saveShops() {
+        try { shops.save(shopsFile); }
+        catch (IOException e) { getLogger().severe("No se pudo guardar shops.yml: " + e.getMessage()); }
     }
 
-    @EventHandler
-    public void onInteractEntity(PlayerInteractEntityEvent e) {
-        if (e.getHand() != EquipmentSlot.HAND) return;
-        Entity ent = e.getRightClicked();
-        if (ent instanceof Player) return;
-        Player p = e.getPlayer();
-
-        String mode = pending.remove(p.getUniqueId());
-        if (mode != null) {
-            e.setCancelled(true);
-            if (!p.hasPermission("neyshop.admin")) return;
-            if (mode.equals("remove")) {
-                if (ent.getPersistentDataContainer().has(shopKey, PersistentDataType.STRING)) {
-                    ent.remove();
-                    send(p, "npc-removed");
-                } else {
-                    send(p, "npc-not-shop");
-                }
-                return;
-            }
-            if (mode.startsWith("link:") && ent instanceof LivingEntity) {
-                String id = mode.substring(5);
-                setupNpc((LivingEntity) ent, id);
-                send(p, "npc-linked", "shop", id);
-            }
-            return;
-        }
-
-        String id = ent.getPersistentDataContainer().get(shopKey, PersistentDataType.STRING);
-        if (id == null) return;
-        e.setCancelled(true);
-        openShop(p, id);
+    private void sendHelp(CommandSender sender) {
+        sender.sendMessage("§8§m--------------------------------");
+        sender.sendMessage("§6§lNEYSHOP §7- §fAYUDA");
+        sender.sendMessage("§e/neyshop help §7- Mostrar esta guía");
+        sender.sendMessage("§e/neyshop create <nombre> §7- Crear tienda");
+        sender.sendMessage("§e/neyshop list §7- Listar tiendas");
+        sender.sendMessage("§e/neyshop open <nombre> §7- Abrir tienda");
+        sender.sendMessage("§e/neyshop delete <nombre> §7- Eliminar tienda");
+        sender.sendMessage("§e/neyshop settitle <tienda> <título> §7- Cambiar título");
+        sender.sendMessage("§e/neyshop setrows <tienda> <1-6> §7- Cambiar filas");
+        sender.sendMessage("§e/neyshop additem <tienda> <precio> [categoría] §7- Añadir objeto en mano");
+        sender.sendMessage("§e/neyshop removeitem <tienda> <slot> §7- Quitar objeto por slot");
+        sender.sendMessage("§e/neyshop category <tienda> <categoría> §7- Asignar categoría");
+        sender.sendMessage("§e/neyshop sell <precio-por-objeto> §7- Vender objeto en mano");
+        sender.sendMessage("§e/neyshop reload §7- Recargar datos");
+        sender.sendMessage("§7Consejo: para agregar un objeto, sostenlo en la mano.");
+        sender.sendMessage("§8§m--------------------------------");
     }
 
-    @EventHandler
-    public void onDamage(EntityDamageEvent e) {
-        if (e.getEntity().getPersistentDataContainer().has(shopKey, PersistentDataType.STRING)) {
-            e.setCancelled(true);
-        }
-    }
-
-    // ---------- Comandos ----------
     @Override
-    public boolean onCommand(CommandSender sender, Command c, String label, String[] a) {
-        if (!sender.hasPermission("neyshop.admin")) {
-            sender.sendMessage(msg("no-permission"));
+    public boolean onCommand(CommandSender sender, Command command, String label, String[] args) {
+        if (args.length == 0 || args[0].equalsIgnoreCase("help") || args[0].equalsIgnoreCase("?")) {
+            sendHelp(sender);
             return true;
         }
-        if (a.length == 0) {
-            sender.sendMessage(msg("usage"));
-            return true;
-        }
-        String sub = a[0].toLowerCase(Locale.ROOT);
+
+        String sub = args[0].toLowerCase(Locale.ROOT);
         switch (sub) {
-            case "reload":
-                reloadConfig();
-                sender.sendMessage(msg("reloaded"));
-                return true;
-
-            case "list":
-                sender.sendMessage(msg("list", "shops", String.join(", ", shopIds())));
-                return true;
-
-            case "open": {
-                if (a.length < 2) { sender.sendMessage(msg("usage")); return true; }
-                Player target = a.length >= 3 ? Bukkit.getPlayerExact(a[2])
-                        : (sender instanceof Player ? (Player) sender : null);
-                if (target == null) { sender.sendMessage(msg("player-not-found")); return true; }
-                openShop(target, a[1].toLowerCase(Locale.ROOT));
-                return true;
-            }
-
             case "create": {
-                if (a.length < 2) { sender.sendMessage(msg("usage")); return true; }
-                String id = a[1].toLowerCase(Locale.ROOT);
-                if (!validId(id)) { sender.sendMessage(msg("bad-id")); return true; }
-                if (shopExists(id)) { sender.sendMessage(msg("shop-exists", "shop", id)); return true; }
-                createShop(id);
-                sender.sendMessage(msg("shop-created", "shop", id));
+                if (!requireAdmin(sender)) return true;
+                if (args.length != 2) { msg(sender, "&cUso: /neyshop create <nombre>"); return true; }
+                String name = safeName(args[1]);
+                if (name == null) { msg(sender, "&cNombre inválido. Usa letras, números, _ o - (máximo 32)."); return true; }
+                if (shopExists(name)) { msg(sender, "&cYa existe una tienda con ese nombre."); return true; }
+                String p = path(name);
+                shops.set(p + ".title", "&6" + name);
+                shops.set(p + ".rows", 3);
+                shops.set(p + ".category", "General");
+                shops.set(p + ".items", new ArrayList<>());
+                saveShops();
+                msg(sender, "&aTienda &e" + name + " &acreada. Usa /neyshop additem " + name + " <precio> sosteniendo un objeto.");
                 return true;
             }
-
+            case "list": {
+                if (getShopNames().isEmpty()) { msg(sender, "&7No hay tiendas. Crea una con /neyshop create <nombre>."); return true; }
+                msg(sender, "&fTiendas: &e" + String.join(", ", getShopNames()));
+                return true;
+            }
+            case "open": {
+                if (!(sender instanceof Player)) { msg(sender, "&cSolo un jugador puede abrir una tienda."); return true; }
+                if (args.length != 2) { msg(sender, "&cUso: /neyshop open <nombre>"); return true; }
+                openShop((Player) sender, args[1]);
+                return true;
+            }
             case "delete": {
-                if (a.length < 2) { sender.sendMessage(msg("usage")); return true; }
-                String id = a[1].toLowerCase(Locale.ROOT);
-                if (!shopExists(id)) { sender.sendMessage(msg("shop-not-found", "shops", String.join(", ", shopIds()))); return true; }
-                getConfig().set("shops." + id, null);
-                saveConfig();
-                sender.sendMessage(msg("shop-deleted", "shop", id));
+                if (!requireAdmin(sender)) return true;
+                if (args.length != 2) { msg(sender, "&cUso: /neyshop delete <nombre>"); return true; }
+                if (!shopExists(args[1])) { msg(sender, "&cEsa tienda no existe."); return true; }
+                shops.set(path(args[1]), null);
+                saveShops();
+                msg(sender, "&aTienda eliminada.");
                 return true;
             }
-
             case "settitle": {
-                if (a.length < 3) { sender.sendMessage(msg("usage")); return true; }
-                String id = a[1].toLowerCase(Locale.ROOT);
-                if (!shopExists(id)) { sender.sendMessage(msg("shop-not-found", "shops", String.join(", ", shopIds()))); return true; }
-                String title = String.join(" ", Arrays.copyOfRange(a, 2, a.length));
-                getConfig().set("shops." + id + ".title", title);
-                saveConfig();
-                sender.sendMessage(msg("title-set", "shop", id));
+                if (!requireAdmin(sender)) return true;
+                if (args.length < 3) { msg(sender, "&cUso: /neyshop settitle <tienda> <título>"); return true; }
+                if (!shopExists(args[1])) { msg(sender, "&cEsa tienda no existe."); return true; }
+                String title = String.join(" ", Arrays.copyOfRange(args, 2, args.length));
+                shops.set(path(args[1]) + ".title", title);
+                saveShops();
+                msg(sender, "&aTítulo actualizado.");
                 return true;
             }
-
             case "setrows": {
-                if (a.length < 3) { sender.sendMessage(msg("usage")); return true; }
-                String id = a[1].toLowerCase(Locale.ROOT);
-                if (!shopExists(id)) { sender.sendMessage(msg("shop-not-found", "shops", String.join(", ", shopIds()))); return true; }
+                if (!requireAdmin(sender)) return true;
+                if (args.length != 3) { msg(sender, "&cUso: /neyshop setrows <tienda> <1-6>"); return true; }
+                if (!shopExists(args[1])) { msg(sender, "&cEsa tienda no existe."); return true; }
                 int rows;
-                try {
-                    rows = Integer.parseInt(a[2]);
-                } catch (NumberFormatException ex) {
-                    sender.sendMessage(msg("bad-number"));
-                    return true;
-                }
-                if (rows < 1 || rows > 6) { sender.sendMessage(msg("bad-number")); return true; }
-                getConfig().set("shops." + id + ".rows", rows);
-                saveConfig();
-                sender.sendMessage(msg("rows-set", "shop", id, "rows", String.valueOf(rows)));
+                try { rows = Integer.parseInt(args[2]); } catch (NumberFormatException e) { msg(sender, "&cLas filas deben ser un número del 1 al 6."); return true; }
+                if (rows < 1 || rows > 6) { msg(sender, "&cLas filas deben estar entre 1 y 6."); return true; }
+                shops.set(path(args[1]) + ".rows", rows);
+                saveShops();
+                msg(sender, "&aTamaño actualizado.");
                 return true;
             }
-
+            case "category": {
+                if (!requireAdmin(sender)) return true;
+                if (args.length < 3) { msg(sender, "&cUso: /neyshop category <tienda> <categoría>"); return true; }
+                if (!shopExists(args[1])) { msg(sender, "&cEsa tienda no existe."); return true; }
+                shops.set(path(args[1]) + ".category", String.join(" ", Arrays.copyOfRange(args, 2, args.length)));
+                saveShops();
+                msg(sender, "&aCategoría actualizada.");
+                return true;
+            }
             case "additem": {
-                if (!(sender instanceof Player)) { sender.sendMessage(msg("player-only")); return true; }
-                Player p = (Player) sender;
-           
+                if (!requireAdmin(sender)) return true;
+                if (!(sender instanceof Player)) { msg(sender, "&cEste comando solo lo puede usar un jugador sosteniendo un objeto."); return true; }
+                if (args.length < 3 || args.length > 4) { msg(sender, "&cUso: /neyshop additem <tienda> <precio> [categoría]"); return true; }
+                if (!shopExists(args[1])) { msg(sender, "&cEsa tienda no existe."); return true; }
+                double price = parsePrice(args[2]);
+                if (!Double.isFinite(price) || price < 0) { msg(sender, "&cEl precio debe ser un número válido mayor o igual a cero."); return true; }
+                Player player = (Player) sender;
+                ItemStack hand = player.getInventory().getItemInMainHand();
+                if (hand == null || hand.getType() == Material.AIR) { msg(sender, "&cSostén el objeto que quieres añadir en tu mano principal."); return true; }
+                String p = path(args[1]) + ".items";
+                List<Map<?, ?>> list = shops.getMapList(p);
+                Map<String, Object> entry = new LinkedHashMap<>();
+                entry.put("item", hand.clone());
+                entry.put("price", price);
+                entry.put("category", args.length == 4 ? args[3] : shops.getString(path(args[1]) + ".category", "General"));
+                entry.put("amount", hand.getAmount());
+                list.add(entry);
+                shops.set(p, list);
+                saveShops();
+                msg(sender, "&aObjeto añadido a &e" + args[1] + "&a por &e" + price + "&a.");
+                return true;
+            }
+            case "removeitem": {
+                if (!requireAdmin(sender)) return true;
+                if (args.length != 3) { msg(sender, "&cUso: /neyshop removeitem <tienda> <slot>"); return true; }
+                if (!shopExists(args[1])) { msg(sender, "&cEsa tienda no existe."); return true; }
+                int slot;
+                try { slot = Integer.parseInt(args[2]); } catch (NumberFormatException e) { msg(sender, "&cEl slot debe ser un número."); return true; }
+                List<Map<?, ?>> items = shops.getMapList(path(args[1]) + ".items");
+                if (slot < 0 || slot >= items.size()) { msg(sender, "&cSlot inválido. Los índices comienzan en 0. Items: " + items.size()); return true; }
+                items.remove(slot);
+                shops.set(path(args[1]) + ".items", items);
+                saveShops();
+                msg(sender, "&aObjeto quitado. Los slots son índices de la lista y empiezan en 0.");
+                return true;
+            }
+            case "sell": {
+                if (!(sender instanceof Player)) { msg(sender, "&cSolo un jugador puede vender objetos."); return true; }
+                if (!sender.hasPermission("neyshop.sell")) { msg(sender, "&cNo tienes permiso para vender objetos."); return true; }
+                if (args.length != 2) { msg(sender, "&cUso: /neyshop sell <precio-por-objeto>"); return true; }
+                if (economy == null) { msg(sender, "&cNo hay economía disponible. Instala Vault y un plugin de economía."); return true; }
+                double price = parsePrice(args[1]);
+                if (!Double.isFinite(price) || price <= 0) { msg(sender, "&cEl precio por objeto debe ser mayor que cero."); return true; }
+                Player player = (Player) sender;
+                ItemStack hand = player.getInventory().getItemInMainHand();
+                if (hand.getType() == Material.AIR || hand.getAmount() <= 0) { msg(sender, "&cSostén el objeto que quieres vender."); return true; }
+                int amount = hand.getAmount();
+                double total = price * amount;
+                if (!Double.isFinite(total) || total <= 0) { msg(sender, "&cTotal inválido."); return true; }
+                player.getInventory().setItemInMainHand(null);
+                economy.depositPlayer(player, total);
+                msg(sender, "&aVendiste &e" + amount + "x " + hand.getType().name() + " &apor &e" + String.format(Locale.US, "%.2f", total) + "&a.");
+                player.playSound(player.getLocation(), Sound.ENTITY_EXPERIENCE_ORB_PICKUP, 1f, 1.2f);
+                return true;
+            }
+            case "reload": {
+                if (!requireAdmin(sender)) return true;
+                shops = YamlConfiguration.loadConfiguration(shopsFile);
+                saveShops();
+                msg(sender, "&aDatos de tiendas recargados.");
+                return true;
+            }
+            default:
+                msg(sender, "&cComando desconocido: &f/" + label + " " + args[0]);
+                msg(sender, "&7Usa &e/neyshop help &7para ver todos los comandos.");
+                return true;
+        }
+    }
+
+    private String safeName(String name) {
+        if (name == null || name.length() > 32 || !name.matches("[A-Za-z0-9_-]+")) return null;
+        return name.toLowerCase(Locale.ROOT);
+    }
+
+    private double parsePrice(String input) {
+        try { return Double.parseDouble(input.replace(",", ".")); }
+        catch (NumberFormatException e) { return Double.NaN; }
+    }
+
+    private void openShop(Player player, String name) {
+        if (!shopExists(name)) { msg(player, "&cEsa tienda no existe. Usa /neyshop list."); return; }
+        String p = path(name);
+        int rows = Math.max(1, Math.min(6, shops.getInt(p + ".rows", 3)));
+        String title = color(SHOP_TITLE_PREFIX + shops.getString(p + ".title", name));
+        Inventory inv = Bukkit.createInventory(null, rows * 9, title);
+        List<Map<?, ?>> items = shops.getMapList(p + ".items");
+        int slot = 0;
+        for (int i = 0; i < items.size() && slot < inv.getSize(); i++) {
+            Map<?, ?> entry = items.get(i);
+            Object raw = entry.get("item");
+            if (!(raw instanceof ItemStack)) continue;
+            ItemStack display = ((ItemStack) raw).clone();
+            double price = number(entry.get("price"), -1);
+            if (price < 0 || !Double.isFinite(price)) continue;
+            Object categoryValue = entry.containsKey("category") ? entry.get("category") : "General";
+            String category = String.valueOf(categoryValue);
+            ItemMeta meta = display.getItemMeta();
+            if (meta != null) {
+                List<String> lore = meta.hasLore() && meta.getLore() != null ? new ArrayList<>(meta.getLore()) : new ArrayList<>();
+                lore.add(" ");
+                lore.add(color("&7Precio: &a" + String.format(Locale.US, "%.2f", price)));
+                lore.add(color("&7Categoría: &e" + category));
+                lore.add(color("&ePulsa para comprar"));
+                meta.setLore(lore);
+                display.setItemMeta(meta);
+            }
+            display = tag(display, "buy:" + name.toLowerCase(Locale.ROOT) + ":" + i);
+            inv.setItem(slot++, display);
+        }
+        openedShop.put(player.getUniqueId(), name.toLowerCase(Locale.ROOT));
+        player.openInventory(inv);
+    }
+
+    private double number(Object value, double fallback) {
+        if (value instanceof Number) return ((Number) value).doubleValue();
+        try { return Double.parseDouble(String.valueOf(value)); } catch (Exception e) { return fallback; }
+    }
+
+    private ItemStack tag(ItemStack item, String value) {
+        ItemStack result = item.clone();
+        ItemMeta meta = result.getItemMeta();
+        if (meta != null) {
+            meta.getPersistentDataContainer().set(guiKey, PersistentDataType.STRING, value);
+            result.setItemMeta(meta);
+        }
+        return result;
+    }
+
+    private String getTag(ItemStack item) {
+        if (item == null || !item.hasItemMeta()) return null;
+        return item.getItemMeta().getPersistentDataContainer().get(guiKey, PersistentDataType.STRING);
+    }
+
+    private void openConfirm(Player player, String shop, int index, ItemStack item, double price) {
+        Inventory inv = Bukkit.createInventory(null, 27, CONFIRM_TITLE);
+        ItemStack yes = new ItemStack(Material.LIME_WOOL);
+        ItemMeta yesMeta = yes.getItemMeta();
+        yesMeta.setDisplayName("§a§lCONFIRMAR COMPRA");
+        yesMeta.setLore(Arrays.asList("§7Precio: §a" + String.format(Locale.US, "%.2f", price), "§ePulsa para confirmar"));
+        yes.setItemMeta(yesMeta);
+        inv.setItem(11, tag(yes, "confirm:yes"));
+        ItemStack no = new ItemStack(Material.RED_WOOL);
+        ItemMeta noMeta = no.getItemMeta();
+        noMeta.setDisplayName("§c§lCANCELAR");
+        noMeta.setLore(Collections.singletonList("§7No se realizará ningún cobro."));
+        no.setItemMeta(noMeta);
+        inv.setItem(15, tag(no, "confirm:no"));
+        player.openInventory(inv);
+        pending.put(player.getUniqueId(), new PendingPurchase(shop, index, item.clone(), price));
+    }
+
+    private void finishPurchase(Player player) {
+        PendingPurchase purchase = pending.remove(player.getUniqueId());
+        if (purchase == null) { msg(player, "&cNo hay compra pendiente."); return; }
+        if (economy == null) { msg(player, "&cNo hay economía disponible. Instala Vault y un plugin de economía."); return; }
+        if (!shopExists(purchase.shop)) { msg(player, "&cLa tienda ya no existe."); return; }
+        List<Map<?, ?>> items = shops.getMapList(path(purchase.shop) + ".items");
+        if (purchase.index < 0 || purchase.index >= items.size()) { msg(player, "&cEl objeto ya no está disponible."); return; }
+        Map<?, ?> entry = items.get(purchase.index);
+        double currentPrice = number(entry.get("price"), Double.NaN);
+        Object raw = entry.get("item");
+        if (!(raw instanceof ItemStack) || !Double.isFinite(currentPrice) || currentPrice < 0) { msg(player, "&cDatos del objeto inválidos."); return; }
+        ItemStack toGive = ((ItemStack) raw).clone();
+        if (!canFit(player, toGive)) { msg(player, "&cNo tienes espacio suficiente en el inventario."); return; }
+        if (economy.getBalance(player) + 1e-9 < currentPrice) { msg(player, "&cNo tienes suficiente dinero."); return; }
+        if (currentPrice > 0) {
+            v
