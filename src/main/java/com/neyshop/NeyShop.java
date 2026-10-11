@@ -13,6 +13,7 @@ import org.bukkit.Sound;
 import org.bukkit.command.Command;
 import org.bukkit.command.CommandExecutor;
 import org.bukkit.command.CommandSender;
+import org.bukkit.command.TabCompleter;
 import org.bukkit.configuration.ConfigurationSection;
 import org.bukkit.enchantments.Enchantment;
 import org.bukkit.entity.Entity;
@@ -40,6 +41,7 @@ import org.bukkit.plugin.java.JavaPlugin;
 import java.text.DecimalFormat;
 import java.text.DecimalFormatSymbols;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
@@ -48,7 +50,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 
-public class NeyShop extends JavaPlugin implements Listener, CommandExecutor {
+public class NeyShop extends JavaPlugin implements Listener, CommandExecutor, TabCompleter {
 
     /** Identifica los inventarios de tienda. */
     public static class ShopHolder implements InventoryHolder {
@@ -65,6 +67,12 @@ public class NeyShop extends JavaPlugin implements Listener, CommandExecutor {
         }
     }
 
+    private static final List<String> SUBS = Arrays.asList(
+            "create", "npc", "link", "remove", "additem", "removeitem",
+            "delete", "settitle", "setrows", "open", "list", "reload");
+    private static final List<String> SHOP_ARG = Arrays.asList(
+            "npc", "link", "additem", "removeitem", "delete", "settitle", "setrows", "open");
+
     private Economy economy;
     private NamespacedKey shopKey;
     private final Map<UUID, String> pending = new HashMap<>();
@@ -74,7 +82,10 @@ public class NeyShop extends JavaPlugin implements Listener, CommandExecutor {
         saveDefaultConfig();
         shopKey = new NamespacedKey(this, "shop");
         getServer().getPluginManager().registerEvents(this, this);
-        if (getCommand("neyshop") != null) getCommand("neyshop").setExecutor(this);
+        if (getCommand("neyshop") != null) {
+            getCommand("neyshop").setExecutor(this);
+            getCommand("neyshop").setTabCompleter(this);
+        }
         getLogger().info("NeyShop activado.");
     }
 
@@ -110,6 +121,35 @@ public class NeyShop extends JavaPlugin implements Listener, CommandExecutor {
         ConfigurationSection sec = getConfig().getConfigurationSection("shops");
         if (sec == null) return Collections.emptySet();
         return sec.getKeys(false);
+    }
+
+    private boolean shopExists(String id) {
+        return getConfig().getConfigurationSection("shops." + id) != null;
+    }
+
+    private boolean validId(String id) {
+        return id.matches("[a-z0-9_-]{1,32}");
+    }
+
+    private int rowsOf(String id) {
+        return Math.max(1, Math.min(6, getConfig().getInt("shops." + id + ".rows", 3)));
+    }
+
+    private void createShop(String id) {
+        String base = "shops." + id;
+        getConfig().set(base + ".title", "&6&l" + id);
+        getConfig().set(base + ".npc-name", "&6&l" + id);
+        getConfig().set(base + ".rows", 3);
+        getConfig().set(base + ".filler", "GRAY_STAINED_GLASS_PANE");
+        saveConfig();
+    }
+
+    private int freeSlot(String id) {
+        int rows = rowsOf(id);
+        for (int i = 0; i < rows * 9; i++) {
+            if (!getConfig().contains("shops." + id + ".items." + i)) return i;
+        }
+        return -1;
     }
 
     private double parseAmount(String raw) {
@@ -153,8 +193,31 @@ public class NeyShop extends JavaPlugin implements Listener, CommandExecutor {
     }
 
     // ---------- Menú de tienda ----------
+    private void addPriceLore(ItemStack it, double price) {
+        ItemMeta meta = it.getItemMeta();
+        if (meta == null) return;
+        List<String> lore = meta.hasLore() && meta.getLore() != null ? new ArrayList<>(meta.getLore()) : new ArrayList<>();
+        lore.add("");
+        lore.add(color(getConfig().getString("messages.lore-price", "&7Precio: &a{price}")
+                .replace("{price}", fmt(price))));
+        lore.add(color(getConfig().getString("messages.lore-click", "&eClic para comprar")));
+        meta.setLore(lore);
+        it.setItemMeta(meta);
+    }
+
     private ItemStack buildItem(ConfigurationSection s, boolean forDisplay) {
         if (s == null) return null;
+
+        // Ítem guardado desde el juego con /neyshop additem
+        if (s.isItemStack("item")) {
+            ItemStack saved = s.getItemStack("item");
+            if (saved == null || saved.getType().isAir()) return null;
+            ItemStack it = saved.clone();
+            if (forDisplay && s.contains("price")) addPriceLore(it, s.getDouble("price"));
+            return it;
+        }
+
+        // Ítem definido a mano en el config
         Material m = Material.matchMaterial(s.getString("material", "STONE"));
         if (m == null || m.isAir()) return null;
         int amount = Math.max(1, Math.min(64, s.getInt("amount", 1)));
@@ -165,12 +228,6 @@ public class NeyShop extends JavaPlugin implements Listener, CommandExecutor {
         if (s.contains("name")) meta.setDisplayName(color(s.getString("name")));
         List<String> lore = new ArrayList<>();
         for (String l : s.getStringList("lore")) lore.add(color(l));
-        if (forDisplay && s.contains("price")) {
-            lore.add("");
-            lore.add(color(getConfig().getString("messages.lore-price", "&7Precio: &a{price}")
-                    .replace("{price}", fmt(s.getDouble("price")))));
-            lore.add(color(getConfig().getString("messages.lore-click", "&eClic para comprar")));
-        }
         if (!lore.isEmpty()) meta.setLore(lore);
 
         for (String en : s.getStringList("enchants")) {
@@ -187,6 +244,7 @@ public class NeyShop extends JavaPlugin implements Listener, CommandExecutor {
             meta.addEnchant(ench, lvl, true);
         }
         it.setItemMeta(meta);
+        if (forDisplay && s.contains("price")) addPriceLore(it, s.getDouble("price"));
         return it;
     }
 
@@ -196,7 +254,7 @@ public class NeyShop extends JavaPlugin implements Listener, CommandExecutor {
             send(p, "shop-not-found", "shops", String.join(", ", shopIds()));
             return;
         }
-        int rows = Math.max(1, Math.min(6, sec.getInt("rows", 3)));
+        int rows = rowsOf(id);
         ShopHolder holder = new ShopHolder(id);
         Inventory inv = Bukkit.createInventory(holder, rows * 9, color(sec.getString("title", "Tienda")));
         holder.inv = inv;
@@ -236,9 +294,9 @@ public class NeyShop extends JavaPlugin implements Listener, CommandExecutor {
 
     private boolean canFit(PlayerInventory inv, ItemStack item) {
         int space = 0;
-        for (ItemStack s : inv.getStorageContents()) {
-            if (s == null || s.getType().isAir()) space += item.getMaxStackSize();
-            else if (s.isSimilar(item)) space += Math.max(0, s.getMaxStackSize() - s.getAmount());
+        for (ItemStack st : inv.getStorageContents()) {
+            if (st == null || st.getType().isAir()) space += item.getMaxStackSize();
+            else if (st.isSimilar(item)) space += Math.max(0, st.getMaxStackSize() - st.getAmount());
             if (space >= item.getAmount()) return true;
         }
         return false;
@@ -271,7 +329,17 @@ public class NeyShop extends JavaPlugin implements Listener, CommandExecutor {
         for (String cmd : s.getStringList("commands")) {
             Bukkit.dispatchCommand(Bukkit.getConsoleSender(), cmd.replace("{player}", p.getName()));
         }
-        String name = s.contains("name") ? color(s.getString("name")) : s.getString("material", "ítem");
+
+        String name;
+        if (item != null) {
+            ItemMeta im = item.getItemMeta();
+            String base = (im != null && im.hasDisplayName())
+                    ? im.getDisplayName()
+                    : item.getType().name().toLowerCase(Locale.ROOT).replace('_', ' ');
+            name = item.getAmount() + "x " + base;
+        } else {
+            name = color(s.getString("name", "ítem"));
+        }
         send(p, "bought", "item", name, "price", fmt(price));
         p.playSound(p.getLocation(), Sound.ENTITY_EXPERIENCE_ORB_PICKUP, 1f, 1f);
     }
@@ -284,9 +352,9 @@ public class NeyShop extends JavaPlugin implements Listener, CommandExecutor {
         if (!(e.getWhoClicked() instanceof Player)) return;
         if (e.getClickedInventory() == null || e.getClickedInventory() != top) return;
         ShopHolder h = (ShopHolder) top.getHolder();
-        ConfigurationSection s = getConfig().getConfigurationSection("shops." + h.id + ".items." + e.getSlot());
-        if (s == null || !s.contains("price")) return;
-        buy((Player) e.getWhoClicked(), s);
+        ConfigurationSection sec = getConfig().getConfigurationSection("shops." + h.id + ".items." + e.getSlot());
+        if (sec == null || !sec.contains("price")) return;
+        buy((Player) e.getWhoClicked(), sec);
     }
 
     @EventHandler
@@ -352,59 +420,85 @@ public class NeyShop extends JavaPlugin implements Listener, CommandExecutor {
 
     // ---------- Comandos ----------
     @Override
-    public boolean onCommand(CommandSender s, Command c, String label, String[] a) {
-        if (!s.hasPermission("neyshop.admin")) {
-            s.sendMessage(msg("no-permission"));
+    public boolean onCommand(CommandSender sender, Command c, String label, String[] a) {
+        if (!sender.hasPermission("neyshop.admin")) {
+            sender.sendMessage(msg("no-permission"));
             return true;
         }
         if (a.length == 0) {
-            s.sendMessage(msg("usage"));
+            sender.sendMessage(msg("usage"));
             return true;
         }
         String sub = a[0].toLowerCase(Locale.ROOT);
         switch (sub) {
             case "reload":
                 reloadConfig();
-                s.sendMessage(msg("reloaded"));
+                sender.sendMessage(msg("reloaded"));
                 return true;
+
             case "list":
-                s.sendMessage(msg("list", "shops", String.join(", ", shopIds())));
+                sender.sendMessage(msg("list", "shops", String.join(", ", shopIds())));
                 return true;
+
             case "open": {
-                if (a.length < 2) { s.sendMessage(msg("usage")); return true; }
-                Player target = a.length >= 3 ? Bukkit.getPlayerExact(a[2]) : (s instanceof Player ? (Player) s : null);
-                if (target == null) { s.sendMessage(msg("player-not-found")); return true; }
-                openShop(target, a[1]);
+                if (a.length < 2) { sender.sendMessage(msg("usage")); return true; }
+                Player target = a.length >= 3 ? Bukkit.getPlayerExact(a[2])
+                        : (sender instanceof Player ? (Player) sender : null);
+                if (target == null) { sender.sendMessage(msg("player-not-found")); return true; }
+                openShop(target, a[1].toLowerCase(Locale.ROOT));
                 return true;
             }
-            case "npc":
-            case "link": {
-                if (!(s instanceof Player)) { s.sendMessage(msg("player-only")); return true; }
-                Player p = (Player) s;
-                if (a.length < 2 || !shopIds().contains(a[1])) {
-                    s.sendMessage(msg("shop-not-found", "shops", String.join(", ", shopIds())));
+
+            case "create": {
+                if (a.length < 2) { sender.sendMessage(msg("usage")); return true; }
+                String id = a[1].toLowerCase(Locale.ROOT);
+                if (!validId(id)) { sender.sendMessage(msg("bad-id")); return true; }
+                if (shopExists(id)) { sender.sendMessage(msg("shop-exists", "shop", id)); return true; }
+                createShop(id);
+                sender.sendMessage(msg("shop-created", "shop", id));
+                return true;
+            }
+
+            case "delete": {
+                if (a.length < 2) { sender.sendMessage(msg("usage")); return true; }
+                String id = a[1].toLowerCase(Locale.ROOT);
+                if (!shopExists(id)) { sender.sendMessage(msg("shop-not-found", "shops", String.join(", ", shopIds()))); return true; }
+                getConfig().set("shops." + id, null);
+                saveConfig();
+                sender.sendMessage(msg("shop-deleted", "shop", id));
+                return true;
+            }
+
+            case "settitle": {
+                if (a.length < 3) { sender.sendMessage(msg("usage")); return true; }
+                String id = a[1].toLowerCase(Locale.ROOT);
+                if (!shopExists(id)) { sender.sendMessage(msg("shop-not-found", "shops", String.join(", ", shopIds()))); return true; }
+                String title = String.join(" ", Arrays.copyOfRange(a, 2, a.length));
+                getConfig().set("shops." + id + ".title", title);
+                saveConfig();
+                sender.sendMessage(msg("title-set", "shop", id));
+                return true;
+            }
+
+            case "setrows": {
+                if (a.length < 3) { sender.sendMessage(msg("usage")); return true; }
+                String id = a[1].toLowerCase(Locale.ROOT);
+                if (!shopExists(id)) { sender.sendMessage(msg("shop-not-found", "shops", String.join(", ", shopIds()))); return true; }
+                int rows;
+                try {
+                    rows = Integer.parseInt(a[2]);
+                } catch (NumberFormatException ex) {
+                    sender.sendMessage(msg("bad-number"));
                     return true;
                 }
-                if (sub.equals("npc")) {
-                    Villager v = p.getWorld().spawn(p.getLocation(), Villager.class);
-                    setupNpc(v, a[1]);
-                    send(p, "npc-created", "shop", a[1]);
-                } else {
-                    pending.put(p.getUniqueId(), "link:" + a[1]);
-                    send(p, "npc-click-link", "shop", a[1]);
-                }
+                if (rows < 1 || rows > 6) { sender.sendMessage(msg("bad-number")); return true; }
+                getConfig().set("shops." + id + ".rows", rows);
+                saveConfig();
+                sender.sendMessage(msg("rows-set", "shop", id, "rows", String.valueOf(rows)));
                 return true;
             }
-            case "remove": {
-                if (!(s instanceof Player)) { s.sendMessage(msg("player-only")); return true; }
-                Player p = (Player) s;
-                pending.put(p.getUniqueId(), "remove");
-                send(p, "npc-click-remove");
-                return true;
-            }
-            default:
-                s.sendMessage(msg("usage"));
-                return true;
-        }
-    }
-  }
+
+            case "additem": {
+                if (!(sender instanceof Player)) { sender.sendMessage(msg("player-only")); return true; }
+                Player p = (Player) sender;
+           
